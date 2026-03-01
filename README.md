@@ -114,9 +114,9 @@ Statische IP, Gateway und Subnetz auf das eigene Netzwerk einstellen:
 ```yaml
 ethernet:
   manual_ip:
-    static_ip: 10.30.249.246   # ← anpassen
-    gateway:   10.30.0.1       # ← anpassen
-    subnet:    255.255.0.0     # ← anpassen
+    static_ip: 192.168.2.246   # ← anpassen
+    gateway:   192.168.2.1       # ← anpassen
+    subnet:    255.255.255.0     # ← anpassen
 ```
 
 GPIO-Pins falls abweichend von der Standardverkabelung:

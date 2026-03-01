@@ -51,8 +51,8 @@ ethernet:
     mode: CLK_OUT
     pin:  GPIO17
   manual_ip:
-    static_ip: xxx.xxx.xxx.xxx
-    gateway:   xxx.xxx.xxx.xxx
+    static_ip: 192.168.2.246
+    gateway:   192.168.2.1
     subnet:    255.255.255.0
   on_connect:
     - logger.log: "Ethernet verbunden – bereit"
