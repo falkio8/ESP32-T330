@@ -1,0 +1,149 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ESPHome – Landis+Gyr T330 / Ultraheat Heat Meter
+#  Board:      LilyGo T-Internet-POE V2  (ESP32 + LAN8720A, PoE)
+#  Netzwerk:   Ethernet-Kabel (kein WLAN)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  Verzeichnisstruktur (relativ zu /config/esphome/):
+#    t330.yaml
+#    secrets.yaml
+#    components/
+#    └── t330_meter/
+#        ├── __init__.py
+#        └── t330_meter.h
+#
+#  Verkabelung IR-Optikkopf → T-Internet-POE V2
+#  ─────────────────────────────────────────────
+#  IR-Kopf TX (vom Zähler) → GPIO36  (Input-only, UART2 RX)
+#  IR-Kopf RX (zum Zähler) → GPIO4   (UART2 TX)
+#  VCC 3,3 V               → 3V3-Pin
+#  GND                     → GND
+#
+#  !! GESPERRTE GPIOS – NICHT für IR-Kopf verwenden !!
+#    GPIO17 (REF_CLK), 18 (MDIO), 19 (TXD0), 21 (TX_EN),
+#    22 (TXD1), 23 (MDC), 25 (RXD0), 26 (RXD1), 27 (CRS_DV)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+esphome:
+  name: waermezaehler
+  friendly_name: "Wärmezähler T330"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+    advanced:
+      minimum_chip_revision: "3.1"
+
+# ── Lokale External Component ─────────────────────────────────────────────────
+external_components:
+  - source:
+      type: local
+      path: components
+
+# ── Ethernet LAN8720A ─────────────────────────────────────────────────────────
+ethernet:
+  type: LAN8720
+  mdc_pin:  GPIO23
+  mdio_pin: GPIO18
+  phy_addr: 0
+  clk:
+    mode: CLK_OUT
+    pin:  GPIO17
+
+# auf eigenes Netzwerk anpassen
+  manual_ip:
+    static_ip: 192.168.2.246
+    gateway:   192.168.2.1
+    subnet:    255.255.255.0
+  on_connect:
+    - logger.log: "Ethernet verbunden – bereit"
+  on_disconnect:
+    - logger.log: "Ethernet getrennt"
+
+# ── Logger ────────────────────────────────────────────────────────────────────
+# baud_rate: 115200 → Ausgabe über USB-Serial (immer aktiv, auch ohne Netzwerk)
+# Für detailliertere Ausgaben: level: DEBUG
+logger:
+  level: INFO
+  baud_rate: 115200
+
+# ── Home Assistant API ────────────────────────────────────────────────────────
+# Über diese API läuft sowohl die Sensor-Übermittlung als auch der Netzwerk-Log.
+api:
+  encryption:
+    key: !secret api_encryption_key
+  # Reboot-Schutz: Gerät startet nicht neu wenn HA kurz nicht erreichbar ist.
+  # Standard wäre 60s – wir erhöhen auf 0 (deaktiviert automatischen Reboot).
+  reboot_timeout: 0s
+
+# ── Safe Mode deaktivieren ────────────────────────────────────────────────────
+# Safe Mode zählt schnelle Reboots und startet irgendwann in einem
+# eingeschränkten Modus. Da das Gerät nach dem Verbinden stabil läuft,
+# deaktivieren wir es um unnötige Reboots zu verhindern.
+safe_mode:
+  disabled: true
+
+# ── OTA-Updates (über Ethernet) ───────────────────────────────────────────────
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# ── T330 Wärmezähler-Komponente ───────────────────────────────────────────────
+t330_meter:
+  id: t330
+  tx_pin: 4
+  rx_pin: 36
+
+  energy_kwh:
+    name: "Wärmeenergie"
+
+  volume_qm:
+    name: "Wasservolumen"
+
+  power_kw:
+    name: "Heizleistung"
+
+  volume_flow:
+    name: "Volumenstrom"
+
+  flow_temp:
+    name: "Vorlauftemperatur"
+
+  return_temp:
+    name: "Rücklauftemperatur"
+
+  temp_diff:
+    name: "Temperaturspreizung"
+
+  operating_time:
+    name: "Betriebszeit"
+
+  activity_duration:
+    name: "Aktivitätsdauer"
+
+  fabrication_number:
+    name: "Fabriknummer"
+
+# ── Diagnose-Sensoren ─────────────────────────────────────────────────────────
+sensor:
+  - platform: uptime
+    name: "Uptime"
+
+text_sensor:
+  - platform: ethernet_info
+    ip_address:
+      name: "IP Adresse"
+
+# ── Buttons ───────────────────────────────────────────────────────────────────
+button:
+  - platform: template
+    name: "Wärmezähler ablesen"
+    icon: mdi:meter-electric
+    on_press:
+      - lambda: |-
+          id(t330).update();
+
+  - platform: restart
+    name: "Gerät neu starten"
+    icon: mdi:restart
