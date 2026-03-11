@@ -2,8 +2,8 @@
 /**
  * ESPHome External Component: Landis+Gyr T330 / Ultraheat Heat Meter
  * ====================================================================
- * Board:    LilyGo T-Internet-POE V2  (LAN8720A RMII)
- * UART:     UART2, TX=GPIO4, RX=GPIO36  (Ethernet-safe Pins)
+ * Board:    ESP32S3 (WiFi)
+ * UART:     UART2, TX/RX configurable via YAML
  *
  * Protokoll: M-Bus, 4-Sequenz-Handshake
  *   Seq1: Wake-up + Versionsanfrage   (2400 Baud)
@@ -35,6 +35,7 @@
 #include <cstring>
 #include <vector>
 #include <cmath>
+#include <atomic>
 
 namespace esphome {
 namespace t330_meter {
@@ -48,7 +49,7 @@ static const char *const TAG = "t330";
 struct T330Data {
     float energy_kwh          = NAN;
     float volume_qm           = NAN;
-    float power_kw            = NAN;
+    float power_w             = NAN;
     float volume_flow_qm_h    = NAN;
     float flow_temp_c         = NAN;
     float return_temp_c       = NAN;
@@ -59,14 +60,14 @@ struct T330Data {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-class T330Component : public Component {
+class T330Component : public PollingComponent {
  public:
     void set_tx_pin(int p) { tx_pin_ = p; }
     void set_rx_pin(int p) { rx_pin_ = p; }
 
     void set_energy_kwh_sensor(sensor::Sensor *s)           { energy_kwh_sensor_ = s; }
     void set_volume_qm_sensor(sensor::Sensor *s)            { volume_qm_sensor_ = s; }
-    void set_power_kw_sensor(sensor::Sensor *s)             { power_kw_sensor_ = s; }
+    void set_power_w_sensor(sensor::Sensor *s)              { power_w_sensor_ = s; }
     void set_volume_flow_sensor(sensor::Sensor *s)          { volume_flow_sensor_ = s; }
     void set_flow_temp_sensor(sensor::Sensor *s)            { flow_temp_sensor_ = s; }
     void set_return_temp_sensor(sensor::Sensor *s)          { return_temp_sensor_ = s; }
@@ -77,6 +78,12 @@ class T330Component : public Component {
 
     float get_setup_priority() const override { return setup_priority::DATA; }
 
+    void dump_config() override {
+        ESP_LOGCONFIG(TAG, "T330 Heat Meter:");
+        ESP_LOGCONFIG(TAG, "  TX Pin: GPIO%d", tx_pin_);
+        ESP_LOGCONFIG(TAG, "  RX Pin: GPIO%d", rx_pin_);
+    }
+
     void setup() override {
         ESP_LOGI(TAG, "Setup UART2: TX=GPIO%d RX=GPIO%d", tx_pin_, rx_pin_);
         trigger_sem_ = xSemaphoreCreateBinary();
@@ -86,7 +93,7 @@ class T330Component : public Component {
         ESP_LOGI(TAG, "FreeRTOS task gestartet auf Core 0");
     }
 
-    void update() {
+    void update() override {
         ESP_LOGI(TAG, "Triggering read cycle");
         xSemaphoreGive(trigger_sem_);
     }
@@ -113,12 +120,12 @@ class T330Component : public Component {
     TaskHandle_t      task_handle_  = nullptr;
     SemaphoreHandle_t trigger_sem_  = nullptr;
     SemaphoreHandle_t data_mutex_   = nullptr;
-    volatile bool     data_ready_   = false;
+    std::atomic<bool> data_ready_{false};
     T330Data          pending_data_;
 
     sensor::Sensor          *energy_kwh_sensor_        = nullptr;
     sensor::Sensor          *volume_qm_sensor_         = nullptr;
-    sensor::Sensor          *power_kw_sensor_          = nullptr;
+    sensor::Sensor          *power_w_sensor_           = nullptr;
     sensor::Sensor          *volume_flow_sensor_       = nullptr;
     sensor::Sensor          *flow_temp_sensor_         = nullptr;
     sensor::Sensor          *return_temp_sensor_       = nullptr;
@@ -315,7 +322,7 @@ class T330Component : public Component {
         while (pos < raw.size()) {
             uint8_t ft = raw[pos++];
             if (ft == 0xE5) continue;
-            if (ft == 0x10) { pos += 3; continue; }
+            if (ft == 0x10) { if (pos + 4 <= raw.size()) pos += 4; else break; continue; }
             if (ft != 0x68) continue;
             if (pos + 3 > raw.size()) break;
             uint8_t l1 = raw[pos], l2 = raw[pos+1]; pos += 3;
@@ -405,7 +412,7 @@ class T330Component : public Component {
 done:       break;
         }
         return !std::isnan(out.energy_kwh)          || !std::isnan(out.volume_qm)        ||
-               !std::isnan(out.power_kw)            || !std::isnan(out.volume_flow_qm_h) ||
+               !std::isnan(out.power_w)             || !std::isnan(out.volume_flow_qm_h) ||
                !std::isnan(out.flow_temp_c)         || !std::isnan(out.return_temp_c)    ||
                !std::isnan(out.temp_diff_k)         || !std::isnan(out.operating_time_h) ||
                !std::isnan(out.activity_duration_s) || !out.fabrication_number.empty();
@@ -422,7 +429,7 @@ done:       break;
         if(v<=0x1F){u="mass_kg";          s=pow(10,(int)(v&7)-3); return;}
         if(v>=0x20&&v<=0x23){static const char*a[]={"on_time_sec","on_time_min","on_time_hours","on_time_days"};u=a[v&3];return;}
         if(v>=0x24&&v<=0x27){static const char*a[]={"operating_time_sec","operating_time_min","operating_time_hours","operating_time_days"};u=a[v&3];return;}
-        if(v<=0x2F){u="power_kw";         s=pow(10,(int)(v&7)-3); return;}
+        if(v<=0x2F){u="power_w";          s=pow(10,(int)(v&7)-3); return;}
         if(v<=0x37){u="power_j_h";        s=pow(10,(int)(v&7));   return;}
         if(v<=0x3F){u="volume_flow_qm_h"; s=pow(10,(int)(v&7)-6); return;}
         if(v<=0x47){u="volume_flow_qm_min";s=pow(10,(int)(v&7)-7);return;}
@@ -454,8 +461,8 @@ done:       break;
             if (std::isnan(out.energy_kwh)) { out.energy_kwh = (float)sv; ESP_LOGI(TAG, "  energy_kwh            = %.3f kWh", sv); return true; }
         } else if (unit == "volume_qm") {
             if (std::isnan(out.volume_qm)) { out.volume_qm = (float)sv; ESP_LOGI(TAG, "  volume_qm             = %.4f m3", sv); return true; }
-        } else if (unit == "power_kw") {
-            if (std::isnan(out.power_kw)) { out.power_kw = (float)sv; ESP_LOGI(TAG, "  power_kw              = %.3f kW", sv); return true; }
+        } else if (unit == "power_w") {
+            if (std::isnan(out.power_w)) { out.power_w = (float)sv; ESP_LOGI(TAG, "  power_w               = %.1f W", sv); return true; }
         } else if (unit == "volume_flow_qm_h") {
             if (std::isnan(out.volume_flow_qm_h)) { out.volume_flow_qm_h = (float)sv; ESP_LOGI(TAG, "  volume_flow_qm_h      = %.4f m3/h", sv); return true; }
         } else if (unit == "flow_temp_c") {
@@ -468,6 +475,10 @@ done:       break;
             if (std::isnan(out.operating_time_h)) { out.operating_time_h = (float)sv; ESP_LOGI(TAG, "  operating_time_hours  = %.0f h", sv); return true; }
         } else if (unit == "operating_time_sec") {
             if (std::isnan(out.operating_time_h)) { out.operating_time_h = (float)(sv/3600.0); ESP_LOGI(TAG, "  operating_time_sec    = %.0f s -> %.2f h", sv, sv/3600.0); return true; }
+        } else if (unit == "operating_time_min") {
+            if (std::isnan(out.operating_time_h)) { out.operating_time_h = (float)(sv/60.0); ESP_LOGI(TAG, "  operating_time_min    = %.0f min -> %.2f h", sv, sv/60.0); return true; }
+        } else if (unit == "operating_time_days") {
+            if (std::isnan(out.operating_time_h)) { out.operating_time_h = (float)(sv*24.0); ESP_LOGI(TAG, "  operating_time_days   = %.0f d -> %.0f h", sv, sv*24.0); return true; }
         } else if (unit == "activity_duration_sec") {
             if (std::isnan(out.activity_duration_s)) { out.activity_duration_s = (float)sv; ESP_LOGI(TAG, "  activity_duration_sec = %.0f s", sv); return true; }
         } else if (unit == "fabrication_number") {
@@ -489,7 +500,7 @@ done:       break;
         else                                   ESP_LOGW(TAG, "  Waermeenergie       : NICHT GEFUNDEN");
         if(!std::isnan(d.volume_qm))           ESP_LOGI(TAG, "  Wasservolumen       : %.4f m3",   d.volume_qm);
         else                                   ESP_LOGW(TAG, "  Wasservolumen       : NICHT GEFUNDEN");
-        if(!std::isnan(d.power_kw))            ESP_LOGI(TAG, "  Heizleistung        : %.4f kW",   d.power_kw);
+        if(!std::isnan(d.power_w))             ESP_LOGI(TAG, "  Heizleistung        : %.1f W",    d.power_w);
         else                                   ESP_LOGW(TAG, "  Heizleistung        : NICHT GEFUNDEN");
         if(!std::isnan(d.volume_flow_qm_h))    ESP_LOGI(TAG, "  Volumenstrom        : %.4f m3/h", d.volume_flow_qm_h);
         else                                   ESP_LOGW(TAG, "  Volumenstrom        : NICHT GEFUNDEN");
@@ -505,7 +516,7 @@ done:       break;
 
         if(energy_kwh_sensor_        &&!std::isnan(d.energy_kwh))          energy_kwh_sensor_->publish_state(d.energy_kwh);
         if(volume_qm_sensor_         &&!std::isnan(d.volume_qm))           volume_qm_sensor_->publish_state(d.volume_qm);
-        if(power_kw_sensor_          &&!std::isnan(d.power_kw))            power_kw_sensor_->publish_state(d.power_kw);
+        if(power_w_sensor_           &&!std::isnan(d.power_w))             power_w_sensor_->publish_state(d.power_w);
         if(volume_flow_sensor_       &&!std::isnan(d.volume_flow_qm_h))    volume_flow_sensor_->publish_state(d.volume_flow_qm_h);
         if(flow_temp_sensor_         &&!std::isnan(d.flow_temp_c))         flow_temp_sensor_->publish_state(d.flow_temp_c);
         if(return_temp_sensor_       &&!std::isnan(d.return_temp_c))       return_temp_sensor_->publish_state(d.return_temp_c);
