@@ -1,4 +1,4 @@
-"""ESPHome External Component – Landis+Gyr T330 Heat Meter."""
+"""ESPHome External Component - Landis+Gyr T330 Heat Meter."""
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import sensor, text_sensor
@@ -12,7 +12,6 @@ from esphome.const import (
     STATE_CLASS_TOTAL_INCREASING,
     STATE_CLASS_MEASUREMENT,
     UNIT_KILOWATT_HOURS,
-    UNIT_KILOWATT,
     UNIT_CELSIUS,
     UNIT_HOUR,
     UNIT_SECOND,
@@ -22,13 +21,13 @@ AUTO_LOAD = ["sensor", "text_sensor", "network"]
 CODEOWNERS = ["@local"]
 
 t330_ns = cg.esphome_ns.namespace("t330_meter")
-T330Component = t330_ns.class_("T330Component", cg.Component)
+T330Component = t330_ns.class_("T330Component", cg.PollingComponent)
 
 CONF_TX_PIN            = "tx_pin"
 CONF_RX_PIN            = "rx_pin"
 CONF_ENERGY_KWH        = "energy_kwh"
 CONF_VOLUME_QM         = "volume_qm"
-CONF_POWER_KW          = "power_kw"
+CONF_POWER_W           = "power_w"
 CONF_VOLUME_FLOW       = "volume_flow"
 CONF_FLOW_TEMP         = "flow_temp"
 CONF_RETURN_TEMP       = "return_temp"
@@ -57,9 +56,9 @@ CONFIG_SCHEMA = (
                 state_class=STATE_CLASS_TOTAL_INCREASING,
                 icon="mdi:water",
             ),
-            cv.Optional(CONF_POWER_KW): sensor.sensor_schema(
-                unit_of_measurement=UNIT_KILOWATT,
-                accuracy_decimals=3,
+            cv.Optional(CONF_POWER_W): sensor.sensor_schema(
+                unit_of_measurement="W",
+                accuracy_decimals=0,
                 device_class=DEVICE_CLASS_POWER,
                 state_class=STATE_CLASS_MEASUREMENT,
                 icon="mdi:fire",
@@ -107,10 +106,11 @@ CONFIG_SCHEMA = (
             ),
             cv.Optional(CONF_FABRICATION_NO): text_sensor.text_sensor_schema(
                 icon="mdi:barcode",
+                entity_category="diagnostic",
             ),
         }
     )
-    .extend(cv.COMPONENT_SCHEMA)
+    .extend(cv.polling_component_schema("30min"))
 )
 
 
@@ -127,9 +127,9 @@ async def to_code(config):
     if CONF_VOLUME_QM in config:
         s = await sensor.new_sensor(config[CONF_VOLUME_QM])
         cg.add(var.set_volume_qm_sensor(s))
-    if CONF_POWER_KW in config:
-        s = await sensor.new_sensor(config[CONF_POWER_KW])
-        cg.add(var.set_power_kw_sensor(s))
+    if CONF_POWER_W in config:
+        s = await sensor.new_sensor(config[CONF_POWER_W])
+        cg.add(var.set_power_w_sensor(s))
     if CONF_VOLUME_FLOW in config:
         s = await sensor.new_sensor(config[CONF_VOLUME_FLOW])
         cg.add(var.set_volume_flow_sensor(s))
