@@ -22,6 +22,7 @@ CODEOWNERS = ["@local"]
 
 t330_ns = cg.esphome_ns.namespace("t330_meter")
 T330Component = t330_ns.class_("T330Component", cg.PollingComponent)
+RealTimeClock = cg.esphome_ns.namespace("time").class_("RealTimeClock", cg.Component)
 
 CONF_TX_PIN            = "tx_pin"
 CONF_RX_PIN            = "rx_pin"
@@ -35,6 +36,9 @@ CONF_TEMP_DIFF         = "temp_diff"
 CONF_OPERATING_TIME    = "operating_time"
 CONF_ACTIVITY_DURATION = "activity_duration"
 CONF_FABRICATION_NO    = "fabrication_number"
+CONF_LAST_READ         = "last_read"
+CONF_READ_STATUS       = "read_status"
+CONF_TIME_ID           = "time_id"
 
 CONFIG_SCHEMA = (
     cv.Schema(
@@ -108,6 +112,15 @@ CONFIG_SCHEMA = (
                 icon="mdi:barcode",
                 entity_category="diagnostic",
             ),
+            cv.Optional(CONF_LAST_READ): text_sensor.text_sensor_schema(
+                icon="mdi:clock-check-outline",
+                entity_category="diagnostic",
+            ),
+            cv.Optional(CONF_READ_STATUS): text_sensor.text_sensor_schema(
+                icon="mdi:check-network-outline",
+                entity_category="diagnostic",
+            ),
+            cv.Optional(CONF_TIME_ID): cv.use_id(RealTimeClock),
         }
     )
     .extend(cv.polling_component_schema("30min"))
@@ -151,3 +164,13 @@ async def to_code(config):
     if CONF_FABRICATION_NO in config:
         s = await text_sensor.new_text_sensor(config[CONF_FABRICATION_NO])
         cg.add(var.set_fabrication_sensor(s))
+    if CONF_LAST_READ in config:
+        s = await text_sensor.new_text_sensor(config[CONF_LAST_READ])
+        cg.add(var.set_last_read_sensor(s))
+        # Verknüpfe die time-Komponente (homeassistant) mit der C++-Klasse
+        if CONF_TIME_ID in config:
+            time_ = await cg.get_variable(config[CONF_TIME_ID])
+            cg.add(var.set_time(time_))
+    if CONF_READ_STATUS in config:
+        s = await text_sensor.new_text_sensor(config[CONF_READ_STATUS])
+        cg.add(var.set_read_status_sensor(s))
