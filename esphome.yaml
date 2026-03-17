@@ -37,6 +37,17 @@ external_components:
       type: local
       path: components
 
+# ── Globals ──────────────────────────────────────────────────────────────────
+# speichert ob die Erstablesung nach Boot bereits durchgeführt wurde, um sie nur 
+# einmal auszulösen (beim ersten Verbinden mit WiFi) und nicht bei jedem Reconnect.
+# Das verhindert unnötige Belastung des Zählers und des Netzwerks direkt nach einem Reboot.
+# Nach der Erstablesung wird der Flag auf true gesetzt, damit weitere Verbindungsereignisse
+# keine erneute Abfrage auslösen.
+globals:
+  - id: boot_read_done
+    type: bool
+    initial_value: 'false'
+
 # ── Wifi ─────────────────────────────────────────────────────────
 
 wifi:
@@ -44,6 +55,15 @@ wifi:
   password: !secret wifi_password
   on_connect:
     - logger.log: "Wifi verbunden - bereit"
+    - if:
+        condition:
+          lambda: 'return !id(boot_read_done);'
+        then:
+          - lambda: 'id(boot_read_done) = true;'
+          - delay: 30s
+          - lambda: |-
+              id(t330).update();
+              ESP_LOGI("t330", "Erstablesung nach Reboot ausgeloest");
   on_disconnect:
     - logger.log: "Wifi getrennt"
 
@@ -123,9 +143,42 @@ t330_meter:
   fabrication_number:
     name: "Fabriknummer"
 
-# In t330.yaml – Abfrageintervall einstellen:
-# (Die Komponente erbt von PollingComponent, update_interval ist in __init__.py definiert)
+  last_read:
+    name: "Letzte Ablesung"
+
+  read_status:
+    name: "Lesestatus"
+
+  time_id: ha_time
+
+# Einstellung des Abfrageintervalls (initial 30min, kann aber über HA dynamisch angepasst werden) für die PollingComponent, die die Daten regelmäßig vom Zähler abruft. Das sorgt für aktuelle Werte in HA, ohne den Zähler zu überlasten.
   update_interval: 30min    
+
+# ── Abfrageintervall (dynamisch änderbar aus HA) ──────────────────────────────
+number:
+  - platform: template
+    name: "Abfrageintervall"
+    id: poll_interval
+    unit_of_measurement: "min"
+    min_value: 5
+    max_value: 360
+    step: 5
+    initial_value: 30
+    optimistic: true
+    restore_value: true
+    icon: mdi:timer-cog
+    entity_category: config
+    on_value:
+      then:
+        - lambda: |-
+            uint32_t ms = (uint32_t)(x * 60000);
+            id(t330).set_update_interval(ms);
+            ESP_LOGI("t330", "Update interval changed to %.0f min (%u ms)", x, ms);
+
+# ── Zeitquelle (fuer Letzte-Ablesung-Zeitstempel) ─────────────────────────────
+time:
+  - platform: homeassistant
+    id: ha_time
 
 # ── Diagnose-Sensoren ─────────────────────────────────────────────────────────
 
