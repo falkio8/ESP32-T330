@@ -28,6 +28,7 @@
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/network/util.h"
+#include "esphome/components/time/real_time_clock.h"
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -75,6 +76,8 @@ class T330Component : public PollingComponent {
     void set_operating_time_sensor(sensor::Sensor *s)       { operating_time_sensor_ = s; }
     void set_activity_duration_sensor(sensor::Sensor *s)    { activity_duration_sensor_ = s; }
     void set_fabrication_sensor(text_sensor::TextSensor *s) { fabrication_sensor_ = s; }
+    void set_last_read_sensor(text_sensor::TextSensor *s)    { last_read_sensor_ = s; }
+    void set_time(time::RealTimeClock *t)                    { time_ = t; }
 
     float get_setup_priority() const override { return setup_priority::DATA; }
 
@@ -133,6 +136,8 @@ class T330Component : public PollingComponent {
     sensor::Sensor          *operating_time_sensor_    = nullptr;
     sensor::Sensor          *activity_duration_sensor_ = nullptr;
     text_sensor::TextSensor *fabrication_sensor_       = nullptr;
+    text_sensor::TextSensor *last_read_sensor_          = nullptr;
+    time::RealTimeClock     *time_                      = nullptr;
 
     static void meter_task_(void *param) {
         static_cast<T330Component *>(param)->task_loop_();
@@ -524,6 +529,19 @@ done:       break;
         if(operating_time_sensor_    &&!std::isnan(d.operating_time_h))    operating_time_sensor_->publish_state(d.operating_time_h);
         if(activity_duration_sensor_ &&!std::isnan(d.activity_duration_s)) activity_duration_sensor_->publish_state(d.activity_duration_s);
         if(fabrication_sensor_       &&!d.fabrication_number.empty())      fabrication_sensor_->publish_state(d.fabrication_number);
+
+        // Zeitstempel der letzten erfolgreichen Ablesung
+        if (last_read_sensor_ && time_) {
+            auto now = time_->now();
+            if (now.is_valid()) {
+                char buf[25];
+                snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d",
+                         now.year, now.month, now.day_of_month,
+                         now.hour, now.minute, now.second);
+                last_read_sensor_->publish_state(buf);
+                ESP_LOGI(TAG, "  Letzte Ablesung     : %s", buf);
+            }
+        }
     }
 };
 
