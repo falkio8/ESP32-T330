@@ -77,6 +77,7 @@ class T330Component : public PollingComponent {
     void set_activity_duration_sensor(sensor::Sensor *s)    { activity_duration_sensor_ = s; }
     void set_fabrication_sensor(text_sensor::TextSensor *s) { fabrication_sensor_ = s; }
     void set_last_read_sensor(text_sensor::TextSensor *s)    { last_read_sensor_ = s; }
+    void set_read_status_sensor(text_sensor::TextSensor *s)  { read_status_sensor_ = s; }
     void set_time(time::RealTimeClock *t)                    { time_ = t; }
 
     float get_setup_priority() const override { return setup_priority::DATA; }
@@ -102,6 +103,21 @@ class T330Component : public PollingComponent {
     }
 
     void loop() override {
+        // Status publizieren (nach jedem Leseversuch, auch bei Fehler)
+        if (status_ready_) {
+            std::string st;
+            if (xSemaphoreTake(data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+                st = pending_status_;
+                status_ready_ = false;
+                xSemaphoreGive(data_mutex_);
+            }
+            if (read_status_sensor_ && !st.empty()) {
+                read_status_sensor_->publish_state(st);
+                ESP_LOGI(TAG, "Lesestatus: %s", st.c_str());
+            }
+        }
+
+        // Messdaten publizieren (nur bei Erfolg)
         if (!data_ready_) return;
         T330Data d;
         if (xSemaphoreTake(data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
@@ -124,7 +140,9 @@ class T330Component : public PollingComponent {
     SemaphoreHandle_t trigger_sem_  = nullptr;
     SemaphoreHandle_t data_mutex_   = nullptr;
     std::atomic<bool> data_ready_{false};
+    std::atomic<bool> status_ready_{false};
     T330Data          pending_data_;
+    std::string       pending_status_;
 
     sensor::Sensor          *energy_kwh_sensor_        = nullptr;
     sensor::Sensor          *volume_qm_sensor_         = nullptr;
@@ -137,6 +155,7 @@ class T330Component : public PollingComponent {
     sensor::Sensor          *activity_duration_sensor_ = nullptr;
     text_sensor::TextSensor *fabrication_sensor_       = nullptr;
     text_sensor::TextSensor *last_read_sensor_          = nullptr;
+    text_sensor::TextSensor *read_status_sensor_        = nullptr;
     time::RealTimeClock     *time_                      = nullptr;
 
     static void meter_task_(void *param) {
@@ -147,6 +166,7 @@ class T330Component : public PollingComponent {
         for (;;) {
             xSemaphoreTake(trigger_sem_, portMAX_DELAY);
             if (!network::is_connected()) {
+                set_status_("FEHLER: Netzwerk nicht verbunden");
                 ESP_LOGW(TAG, "Netzwerk nicht verbunden - Abfrage uebersprungen");
                 continue;
             }
@@ -158,10 +178,36 @@ class T330Component : public PollingComponent {
                     data_ready_   = true;
                     xSemaphoreGive(data_mutex_);
                 }
+                set_status_("OK");
                 ESP_LOGI(TAG, "Task: read successful");
             } else {
-                ESP_LOGW(TAG, "Task: read failed - retry next interval");
+                set_status_("FEHLER: Ablesung fehlgeschlagen - Retry in 2 min");
+                ESP_LOGW(TAG, "Task: read failed - retry in 120s");
+                vTaskDelay(pdMS_TO_TICKS(120000));
+                // Retry
+                T330Data data2;
+                ESP_LOGI(TAG, "Task: starting retry read");
+                if (read_meter_(data2)) {
+                    if (xSemaphoreTake(data_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+                        pending_data_ = data2;
+                        data_ready_   = true;
+                        xSemaphoreGive(data_mutex_);
+                    }
+                    set_status_("OK (Retry)");
+                    ESP_LOGI(TAG, "Task: retry successful");
+                } else {
+                    set_status_("FEHLER: Ablesung fehlgeschlagen (auch nach Retry)");
+                    ESP_LOGW(TAG, "Task: retry also failed");
+                }
             }
+        }
+    }
+
+    void set_status_(const std::string &status) {
+        if (xSemaphoreTake(data_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+            pending_status_ = status;
+            status_ready_ = true;
+            xSemaphoreGive(data_mutex_);
         }
     }
 
@@ -283,6 +329,8 @@ class T330Component : public PollingComponent {
         }
 
         // Phase 2: 9600 Baud - Archiv-Frames (stor=1..25) empfangen
+        // Nur Baud-Register umschalten - kein voller UART-Reset!
+        // Der Meter streamt bereits, uart_init_() wuerde Bytes verlieren.
         uart_set_baud_(9600);
         {
             uint8_t chunk[512];
@@ -295,6 +343,7 @@ class T330Component : public PollingComponent {
             ESP_LOGI(TAG, "Seq4 - Phase 2: %d Bytes @ 9600 Baud", p2);
         }
 
+        // Zurueck auf 2400 Baud
         uart_set_baud_(2400);
         int total = (int)out.size();
         if (total > 0) {
