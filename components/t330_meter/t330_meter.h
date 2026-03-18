@@ -181,23 +181,47 @@ class T330Component : public PollingComponent {
                 set_status_("OK");
                 ESP_LOGI(TAG, "Task: read successful");
             } else {
-                set_status_("FEHLER: Ablesung fehlgeschlagen - Retry in 2 min");
-                ESP_LOGW(TAG, "Task: read failed - retry in 120s");
-                vTaskDelay(pdMS_TO_TICKS(120000));
-                // Retry
-                T330Data data2;
-                ESP_LOGI(TAG, "Task: starting retry read");
-                if (read_meter_(data2)) {
-                    if (xSemaphoreTake(data_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
-                        pending_data_ = data2;
-                        data_ready_   = true;
-                        xSemaphoreGive(data_mutex_);
+                // Retry-Strategie: bis zu 2 Retries mit UART-Reset
+                //   Retry 1: nach  30s (kurze Pause + UART-Reset)
+                //   Retry 2: nach 120s (laengere Pause fuer tiefen Schlaf)
+                bool retry_ok = false;
+                static const int retry_delays[] = {30, 120}; // Sekunden
+                static const int max_retries = 2;
+
+                for (int r = 0; r < max_retries && !retry_ok; r++) {
+                    int delay_s = retry_delays[r];
+                    ESP_LOGW(TAG, "Task: read failed - Retry %d/%d in %ds", r + 1, max_retries, delay_s);
+                    if (r == 0)
+                        set_status_("FEHLER: Ablesung fehlgeschlagen - Retry in 30s");
+                    else
+                        set_status_("FEHLER: Retry 1 fehlgeschlagen - Retry 2 in 120s");
+
+                    vTaskDelay(pdMS_TO_TICKS(delay_s * 1000));
+
+                    // Voller UART-Hardware-Reset vor Retry:
+                    // Loescht FIFO, Error-Flags, Interrupt-Status - sauberer Neustart
+                    ESP_LOGI(TAG, "Task: UART-Reset vor Retry %d", r + 1);
+                    uart_init_(2400);
+
+                    ESP_LOGI(TAG, "Task: starting retry %d/%d", r + 1, max_retries);
+                    T330Data retry_data;
+                    if (read_meter_(retry_data)) {
+                        if (xSemaphoreTake(data_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+                            pending_data_ = retry_data;
+                            data_ready_   = true;
+                            xSemaphoreGive(data_mutex_);
+                        }
+                        char msg[48];
+                        snprintf(msg, sizeof(msg), "OK (Retry %d)", r + 1);
+                        set_status_(msg);
+                        ESP_LOGI(TAG, "Task: retry %d successful", r + 1);
+                        retry_ok = true;
                     }
-                    set_status_("OK (Retry)");
-                    ESP_LOGI(TAG, "Task: retry successful");
-                } else {
-                    set_status_("FEHLER: Ablesung fehlgeschlagen (auch nach Retry)");
-                    ESP_LOGW(TAG, "Task: retry also failed");
+                }
+
+                if (!retry_ok) {
+                    set_status_("FEHLER: Ablesung fehlgeschlagen (auch nach 2 Retries)");
+                    ESP_LOGW(TAG, "Task: all %d retries failed", max_retries);
                 }
             }
         }
@@ -243,29 +267,63 @@ class T330Component : public PollingComponent {
     }
 
     // ── Sequenz 1: Wake-up + Versionsanfrage ─────────────────────────────────
+    //
+    // Progressive Preamble-Strategie:
+    //   Versuche  1- 5: 240 Null-Bytes (~1.0s IR-Energie)
+    //   Versuche  6-10: 480 Null-Bytes (~2.0s IR-Energie)
+    //   -- 5 Sekunden Pause (Meter-Aufwachzeit) --
+    //   Versuche 11-15: 960 Null-Bytes (~4.0s IR-Energie)
+    //
+    // Hintergrund: Der T330 ist batteriebetrieben und hat einen
+    // Kondensator-basierten IR-Aufweckkreis. Bei laengerem Tiefschlaf
+    // oder EMV-Stoerungen (Heizungsbetrieb) braucht er mehr IR-Energie.
+    //
     bool seq1_wakeup_() {
         static const uint8_t C[] = {0x68,0x05,0x05,0x68,0x73,0xFE,0x51,0x0F,0x0F,0xE0,0x16};
-        auto buf = make_cmd_(C, sizeof(C));
         uint8_t resp[64];
-        for (int i = 1; i <= 10; i++) {
+        const int max_attempts = 15;
+
+        for (int i = 1; i <= max_attempts; i++) {
+            // Progressive preamble: mehr IR-Energie fuer spaetere Versuche
+            size_t pre_len = (i <= 5) ? 240 : (i <= 10) ? 480 : 960;
+            auto buf = make_cmd_(C, sizeof(C), pre_len);
+
+            // Nach 10 fehlgeschlagenen Versuchen: Pause, damit der Meter
+            // die akkumulierte IR-Energie verarbeiten kann
+            if (i == 11) {
+                ESP_LOGI(TAG, "Seq1: 10 Versuche ohne Antwort - 5s Pause, erhoehe Preamble auf 960 Bytes");
+                vTaskDelay(pdMS_TO_TICKS(5000));
+            }
+
             uart_flush_();
             uart_write_(buf.data(), buf.size());
             int n = uart_read_(resp, sizeof(resp), 1500);
-            if (n <= 0) { ESP_LOGI(TAG, "Seq1 #%d/10: keine Antwort (IR-Kopf korrekt aufgesetzt?)", i); continue; }
+
+            if (n <= 0) {
+                ESP_LOGI(TAG, "Seq1 #%d/%d: keine Antwort (preamble=%d)", i, max_attempts, (int)pre_len);
+                continue;
+            }
             if (n >= (int)sizeof(C)) {
                 bool echo = true;
                 for (size_t k = 0; k < sizeof(C) && echo; k++)
                     if (resp[n - sizeof(C) + k] != C[k]) echo = false;
-                if (echo) { ESP_LOGW(TAG, "Seq1 #%d/10: Echo - IR-Kopf falsch platziert!", i); continue; }
+                if (echo) { ESP_LOGW(TAG, "Seq1 #%d/%d: Echo - IR-Kopf falsch platziert!", i, max_attempts); continue; }
             }
             for (int k = 0; k < n - 1; k++) {
                 if (resp[k] == 'N' && resp[k+1] == 'b') {
-                    ESP_LOGI(TAG, "Seq1 OK - Versionsstring empfangen (%d Bytes)", n);
+                    ESP_LOGI(TAG, "Seq1 OK - Versionsstring empfangen (%d Bytes, Versuch %d, preamble=%d)", n, i, (int)pre_len);
                     return true;
                 }
             }
+            // Bytes empfangen aber kein Versionsstring - Hex-Dump zur Diagnose
+            ESP_LOGW(TAG, "Seq1 #%d/%d: %d Bytes empfangen aber kein Versionsstring", i, max_attempts, n);
+            ESP_LOGW(TAG, "  Hex: %02X %02X %02X %02X %02X %02X %02X %02X",
+                     n > 0 ? resp[0] : 0, n > 1 ? resp[1] : 0,
+                     n > 2 ? resp[2] : 0, n > 3 ? resp[3] : 0,
+                     n > 4 ? resp[4] : 0, n > 5 ? resp[5] : 0,
+                     n > 6 ? resp[6] : 0, n > 7 ? resp[7] : 0);
         }
-        ESP_LOGW(TAG, "Seq1 FEHLGESCHLAGEN");
+        ESP_LOGW(TAG, "Seq1 FEHLGESCHLAGEN nach %d Versuchen", max_attempts);
         return false;
     }
 
@@ -358,6 +416,15 @@ class T330Component : public PollingComponent {
     bool read_meter_(T330Data &out) {
         uart_set_baud_(2400);
         uart_flush_();
+
+        // Diagnose: UART-RX-Puffer und Pinstatus pruefen
+        size_t buffered = 0;
+        uart_get_buffered_data_len(T330_UART_PORT, &buffered);
+        if (buffered > 0) {
+            ESP_LOGW(TAG, "UART RX-Puffer nicht leer nach Flush: %d Bytes (werden verworfen)", (int)buffered);
+            uart_flush_input(T330_UART_PORT);
+        }
+
         ESP_LOGI(TAG, "── Starte M-Bus Kommunikation (4 Sequenzen) ──");
         if (!seq1_wakeup_()) { ESP_LOGW(TAG, "Abbruch nach Seq1"); return false; }
         if (!seq2_reset_())  { ESP_LOGW(TAG, "Abbruch nach Seq2"); return false; }
