@@ -38,6 +38,7 @@ CONF_ACTIVITY_DURATION = "activity_duration"
 CONF_FABRICATION_NO    = "fabrication_number"
 CONF_LAST_READ         = "last_read"
 CONF_READ_STATUS       = "read_status"
+CONF_SEQ1_ATTEMPTS     = "seq1_attempts"
 CONF_TIME_ID           = "time_id"
 
 CONFIG_SCHEMA = (
@@ -108,6 +109,12 @@ CONFIG_SCHEMA = (
                 state_class=STATE_CLASS_TOTAL_INCREASING,
                 icon="mdi:timer",
             ),
+            cv.Optional(CONF_SEQ1_ATTEMPTS): sensor.sensor_schema(
+                accuracy_decimals=0,
+                state_class=STATE_CLASS_MEASUREMENT,
+                icon="mdi:counter",
+                entity_category="diagnostic",
+            ),
             cv.Optional(CONF_FABRICATION_NO): text_sensor.text_sensor_schema(
                 icon="mdi:barcode",
                 entity_category="diagnostic",
@@ -161,6 +168,9 @@ async def to_code(config):
     if CONF_ACTIVITY_DURATION in config:
         s = await sensor.new_sensor(config[CONF_ACTIVITY_DURATION])
         cg.add(var.set_activity_duration_sensor(s))
+    if CONF_SEQ1_ATTEMPTS in config:
+        s = await sensor.new_sensor(config[CONF_SEQ1_ATTEMPTS])
+        cg.add(var.set_seq1_attempts_sensor(s))
     if CONF_FABRICATION_NO in config:
         s = await text_sensor.new_text_sensor(config[CONF_FABRICATION_NO])
         cg.add(var.set_fabrication_sensor(s))
